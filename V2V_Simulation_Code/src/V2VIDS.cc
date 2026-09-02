@@ -1,14 +1,25 @@
 //
 // V2VIDS.cc
-// Implementation of the anomaly-based IDS module. See V2VIDS.h for overview.
+// Anomaly-based Intrusion Detection System module for V2V communication.
 //
-// NOTE: Reconstructed from development-session records. Functionally faithful
-// to the implementation that produced the reported results; reconcile against
-// the authoritative VM copy before archival submission.
+// Detects two attack vectors:
+//   - Replay attacks: via duplicate (senderAddress, serial) detection.
+//   - Phantom vehicle attacks: via a composite anomaly score derived from
+//     inter-message interval regularity, serial-number continuity, and
+//     message frequency.
+//
+// Per-message detection latency is measured as wall-clock processing time on
+// the host, from message reception to the completed detection decision, using
+// a high-resolution monotonic clock.
+//
+//
+//
+// MSc Cyber Security Research Paper (UFCE4B-60-M), UWE Bristol.
 //
 
 #include "veins/modules/application/traci/V2VIDS.h"
 #include "veins/modules/application/traci/TraCIDemo11pMessage_m.h"
+#include <chrono>
 #include <cmath>
 
 using namespace veins;
@@ -88,36 +99,42 @@ double V2VIDS::computeAnomalyScore(const SenderRecord& record,
 
 void V2VIDS::onWSM(BaseFrame1609_4* frame)
 {
-    simtime_t recvTime = simTime();
+    // Start of per-message processing (wall-clock, high-resolution).
+    auto _procStart = std::chrono::high_resolution_clock::now();
 
     TraCIDemo11pMessage* wsm = check_and_cast<TraCIDemo11pMessage*>(frame);
     long senderAddr = wsm->getSenderAddress();
     int serial      = wsm->getSerial();
+    simtime_t recvTime = simTime();
 
-    // Replay bookkeeping: has this (sender, serial) already been seen?
+    // Replay detection: duplicate (sender, serial) pair = replayed message.
     auto key = std::make_pair(senderAddr, serial);
     bool isReplay = (seenSerials.count(key) > 0);
+    seenSerials.insert(key);
 
-    // Ground truth for metric labelling.
     bool isActualAttack = replayMode ? isReplay : isPhantomSender(senderAddr);
 
-    // Composite anomaly score (phantom path).
     SenderRecord& record = senderHistory[senderAddr];
+    record.totalMessages++;
+
     double anomalyScore = computeAnomalyScore(record, recvTime, serial);
 
-    // Update sliding windows.
     record.timestamps.push_back(recvTime);
     record.serials.push_back(serial);
     if ((int)record.timestamps.size() > windowSize) {
         record.timestamps.pop_front();
         record.serials.pop_front();
     }
-    seenSerials.insert(key);
 
-    // Detection decision.
+    // For replay: flag duplicates directly.
     bool detected = replayMode ? isReplay : (anomalyScore >= detectionThreshold);
 
-    // Blacklist short-circuit (phantom mode): a flagged sender stays flagged.
+    // Per-message processing latency (wall-clock, on the simulation host),
+    // captured from entry to the completed detection decision.
+    auto _procEnd = std::chrono::high_resolution_clock::now();
+    double _procNs = std::chrono::duration<double, std::nano>(_procEnd - _procStart).count();
+    emit(detectionLatencySignal, _procNs);
+
     if (blacklistedSenders.count(senderAddr) && !replayMode) {
         if (isActualAttack) truePositives++;
         else falsePositives++;
@@ -128,7 +145,6 @@ void V2VIDS::onWSM(BaseFrame1609_4* frame)
         if (!replayMode) blacklistedSenders.insert(senderAddr);
         record.anomalyCount++;
         totalDetections++;
-        emit(detectionLatencySignal, recvTime.dbl());
 
         EV_INFO << "IDS ALERT on " << getParentModule()->getFullName()
                 << " | sender=" << senderAddr
