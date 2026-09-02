@@ -19,5 +19,5 @@ simple V2VIDS extends DemoBaseApplLayer
         bool replayMode = default(false);
 
         @signal[detectionLatency](type=double);
-        @statistic[detectionLatency](title="Detection Latency"; source=detectionLatency; record=vector,mean,max);
+        @statistic[detectionLatency](title="Detection Latency (ns)"; source=detectionLatency; record=vector,mean,max,min);
 }
